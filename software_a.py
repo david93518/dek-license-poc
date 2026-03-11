@@ -25,20 +25,36 @@ def _b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"))
 
 
+def _get_passphrase():
+    """可選 passphrase（環境變數 KEY_PASSPHRASE），用於私鑰加密儲存"""
+    p = os.environ.get("KEY_PASSPHRASE", "")
+    return p.encode("utf-8") if p else None
+
+
 def load_or_create_keypair(key_path: str):
-    """載入或產生 A 的 RSA 金鑰對"""
+    """載入或產生 A 的 RSA 金鑰對。若有 KEY_PASSPHRASE 則以 passphrase 加密儲存"""
+    passphrase = _get_passphrase()
     if os.path.exists(key_path):
         with open(key_path, "rb") as f:
-            priv = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+            data = f.read()
+        try:
+            priv = serialization.load_pem_private_key(data, password=passphrase, backend=default_backend())
+        except Exception:
+            priv = serialization.load_pem_private_key(data, password=None, backend=default_backend())
         pub = priv.public_key()
     else:
         priv = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
         pub = priv.public_key()
+        enc = (
+            serialization.BestAvailableEncryption(passphrase)
+            if passphrase
+            else serialization.NoEncryption()
+        )
         with open(key_path, "wb") as f:
             f.write(priv.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),  # PoC：實務應改用 passphrase 或 KMS/HSM
+                encryption_algorithm=enc,
             ))
     return priv, pub
 
@@ -82,9 +98,9 @@ def encrypt_document(plaintext: bytes, dek: bytes) -> bytes:
 
 def secure_clear(buf: bytearray):
     """
-    盡可能從記憶體清除敏感資料（PoC best-effort）。
-    限制：Python bytes 為 immutable，此處清除的是 bytearray(dek) 的拷貝，
-    原始 dek 本體無法強制覆寫，僅能仰賴 GC 回收。
+    盡可能從記憶體清除敏感資料（best-effort）。
+    限制：decrypt() 回傳 immutable bytes，原始本體無法覆寫；此處清除的是
+    bytearray 拷貝。實務高敏感環境可考慮 C 擴展或專用記憶體區。
     """
     for i in range(len(buf)):
         buf[i] = 0
@@ -114,6 +130,7 @@ def run(input_path: str, output_prefix: str, key_path: str = "keys/a_private.pem
             print(f"  ③ 以 DEK 執行 ChaCha20-Poly1305 加密")
             print(f"     → 明文 {len(plaintext)} bytes → 密文 + nonce(12)")
         c_doc = encrypt_document(plaintext, dek)
+        del plaintext  # 盡早釋放敏感資料參考
         h_dek_computed = hashlib.sha256(dek).digest()
         assert h_dek_computed == h_dek, "H_dek 與 LS 回傳不一致"
         if DEMO:

@@ -25,21 +25,37 @@ def _b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"))
 
 
+def _get_passphrase():
+    """可選 passphrase（環境變數 KEY_PASSPHRASE），用於私鑰加密儲存"""
+    p = os.environ.get("KEY_PASSPHRASE", "")
+    return p.encode("utf-8") if p else None
+
+
 def load_or_create_keypair(key_path: str):
-    """載入或產生 B 的 RSA 金鑰對"""
+    """載入或產生 B 的 RSA 金鑰對。若有 KEY_PASSPHRASE 則以 passphrase 加密儲存"""
     from cryptography.hazmat.primitives.asymmetric import rsa
+    passphrase = _get_passphrase()
     if os.path.exists(key_path):
         with open(key_path, "rb") as f:
-            priv = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+            data = f.read()
+        try:
+            priv = serialization.load_pem_private_key(data, password=passphrase, backend=default_backend())
+        except Exception:
+            priv = serialization.load_pem_private_key(data, password=None, backend=default_backend())
         pub = priv.public_key()
     else:
         priv = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
         pub = priv.public_key()
+        enc = (
+            serialization.BestAvailableEncryption(passphrase)
+            if passphrase
+            else serialization.NoEncryption()
+        )
         with open(key_path, "wb") as f:
             f.write(priv.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),  # PoC：實務應改用 passphrase 或 KMS/HSM
+                encryption_algorithm=enc,
             ))
     return priv, pub
 

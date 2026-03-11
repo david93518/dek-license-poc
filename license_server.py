@@ -1,17 +1,23 @@
 """
 License Server (LS) - PoC
 負責：生成 DEK、以客戶端公鑰封裝 DEK、依 H_dek 查詢並以 B 公鑰封裝 DEK
-支援：DEK TTL、過期清理、操作審計
+支援：身分驗證（公鑰指紋綁定、角色授權、RSA 驗證）、DEK TTL、過期清理、
+      操作審計（append-only 檔）、API schema 驗證、rate limit
 """
 import os
 import sys
+import json
 import base64
 import hashlib
 import time
+from collections import defaultdict
 from flask import Flask, request, jsonify
 
 DEMO = os.environ.get("DEMO", "0") == "1"
-DEK_TTL_SECONDS = int(os.environ.get("DEK_TTL_SECONDS", "3600"))  # 預設 1 小時
+DEK_TTL_SECONDS = int(os.environ.get("DEK_TTL_SECONDS", "3600"))
+AUDIT_FILE = os.environ.get("AUDIT_FILE", "")  # 若設定則寫入 append-only 檔
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))  # 每 client 每分鐘上限
+ALLOWED_CLIENTS = frozenset(["A", "B"])  # 僅允許 A、B 註冊
 
 
 def _log(msg: str):
@@ -25,12 +31,11 @@ from cryptography.hazmat.backends import default_backend
 
 app = Flask(__name__)
 
-# 已註冊客戶端：client_id -> (public_key_object, public_key_pem)
-clients = {}
-# DEK 儲存：h_dek (bytes) -> {"dek": bytes, "created_at": float}
+clients = {}  # client_id -> {key, pem, fingerprint}
 dek_store = {}
-# 操作審計：不可竄改（PoC 為記憶體 list，實務可改為 append-only 檔或外部系統）
-audit_log = []
+audit_log = []  # 記憶體副本，供 /audit 查詢
+# rate limit: client_id -> [(timestamp, action), ...]
+_rate_entries = defaultdict(list)
 
 
 def _bytes_to_b64(b: bytes) -> str:
@@ -52,8 +57,8 @@ def _b64_to_h_dek_strict(s: str):
         return None
 
 
-def _audit(action: str, client_id: str, h_dek_preview: str | None = None):
-    """審計：記錄操作（誰、何時、什麼）"""
+def _audit(action: str, client_id: str, h_dek_preview=None):
+    """審計：記錄操作，寫入記憶體並可選 append-only 檔（不可竄改）"""
     entry = {
         "ts": time.time(),
         "action": action,
@@ -61,6 +66,43 @@ def _audit(action: str, client_id: str, h_dek_preview: str | None = None):
         "h_dek": h_dek_preview,
     }
     audit_log.append(entry)
+    if AUDIT_FILE:
+        try:
+            with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+
+def _check_rate_limit(client_id: str, action: str) -> tuple[bool, str]:
+    """簡易 rate limit：每 client 每分鐘 N 次，回傳 (ok, error_msg)"""
+    now = time.time()
+    cutoff = now - 60
+    key = client_id
+    _rate_entries[key] = [(t, a) for t, a in _rate_entries[key] if t > cutoff]
+    if len(_rate_entries[key]) >= RATE_LIMIT_PER_MIN:
+        return False, "rate limit exceeded"
+    _rate_entries[key].append((now, action))
+    return True, ""
+
+
+def _pubkey_fingerprint(pub) -> str:
+    """公鑰指紋：SHA256 的 hex"""
+    der = pub.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(der).hexdigest()
+
+
+def _validate_public_key_rsa(pub) -> tuple[bool, str]:
+    """驗證公鑰為 RSA 且長度 >= 2048，回傳 (ok, error_msg)"""
+    if not isinstance(pub, rsa.RSAPublicKey):
+        return False, "public key must be RSA"
+    key_size = pub.key_size
+    if key_size < 2048:
+        return False, f"RSA key size must be >= 2048, got {key_size}"
+    return True, ""
 
 
 def _cleanup_expired_deks() -> int:
@@ -80,41 +122,73 @@ def _get_json():
     return data
 
 
+def _schema_register(data):
+    """schema：register 必填 client_id, public_key_pem 且為字串"""
+    cid = data.get("client_id")
+    pem = data.get("public_key_pem")
+    if not isinstance(cid, str) or not cid.strip():
+        return "client_id must be non-empty string", 400
+    if not isinstance(pem, str) or not pem.strip():
+        return "public_key_pem must be non-empty string", 400
+    if cid not in ALLOWED_CLIENTS:
+        return f"client_id must be one of {sorted(ALLOWED_CLIENTS)}", 403
+    return None, 0
+
+
 @app.route("/register", methods=["POST"])
 def register():
-    """客戶端註冊公鑰（PoC 身分綁定）"""
+    """客戶端註冊公鑰。身分驗證：僅 A/B、公鑰指紋綁定、RSA >= 2048"""
     data = _get_json()
     if data is None:
         return jsonify({"error": "invalid or missing JSON body"}), 400
-    client_id = data.get("client_id")
-    public_key_pem = data.get("public_key_pem")
-    if not client_id or not public_key_pem:
-        return jsonify({"error": "missing client_id or public_key_pem"}), 400
+    err, code = _schema_register(data)
+    if err:
+        return jsonify({"error": err}), code
+    client_id = data["client_id"].strip()
+    public_key_pem = data["public_key_pem"].strip()
+    ok, _ = _check_rate_limit(client_id, "register")
+    if not ok:
+        return jsonify({"error": "rate limit exceeded"}), 429
     try:
         pub = serialization.load_pem_public_key(
             public_key_pem.encode("utf-8"), backend=default_backend()
         )
-        clients[client_id] = {"key": pub, "pem": public_key_pem}
-        _audit("register", client_id)
-        _log(f"客戶端 {client_id} 註冊公鑰完成")
-        return jsonify({"status": "ok", "client_id": client_id})
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": f"invalid public key: {e}"}), 400
+    ok, msg = _validate_public_key_rsa(pub)
+    if not ok:
+        return jsonify({"error": msg}), 400
+    fp = _pubkey_fingerprint(pub)
+    if client_id in clients:
+        if clients[client_id]["fingerprint"] != fp:
+            return jsonify({"error": "client_id already registered with different key (409)"}), 409
+    clients[client_id] = {"key": pub, "pem": public_key_pem, "fingerprint": fp}
+    _audit("register", client_id)
+    _log(f"客戶端 {client_id} 註冊公鑰完成")
+    return jsonify({"status": "ok", "client_id": client_id})
+
+
+ALLOWED_REQUEST_DEK = "A"  # 僅 A 可請求新 DEK
+ALLOWED_GET_DEK = "B"      # 僅 B 可取用 DEK
 
 
 @app.route("/request_dek", methods=["POST"])
 def request_dek():
     """
-    軟體 A 請求一組新 DEK。
-    LS 生成 DEK、計算 H_dek、以 A 公鑰加密 DEK，並儲存 DEK 供之後 B 使用。
+    軟體 A 請求一組新 DEK。角色授權：僅 A 可呼叫。
     """
     try:
         data = _get_json()
         if data is None:
             return jsonify({"error": "invalid or missing JSON body"}), 400
-        client_id = data.get("client_id")
+        client_id = data.get("client_id") if isinstance(data.get("client_id"), str) else None
         if not client_id or client_id not in clients:
             return jsonify({"error": "unknown client_id"}), 403
+        if client_id != ALLOWED_REQUEST_DEK:
+            return jsonify({"error": "only client A may request new DEK"}), 403
+        ok, msg = _check_rate_limit(client_id, "request_dek")
+        if not ok:
+            return jsonify({"error": msg}), 429
         _log(f"收到 {client_id} 的 DEK 請求")
         _cleanup_expired_deks()  # 定期清理過期 DEK
         # 生成 32 bytes DEK（ChaCha20 用）
@@ -144,16 +218,20 @@ def request_dek():
 @app.route("/get_dek_for_decrypt", methods=["POST"])
 def get_dek_for_decrypt():
     """
-    軟體 B 以 H_dek 請求取得 DEK（以 B 公鑰加密）。
-    LS 驗證 B 身分並確認 H_dek 對應的 DEK 存在。取用後 DEK 立即刪除（one-time-use）。
+    軟體 B 以 H_dek 請求取得 DEK。角色授權：僅 B 可呼叫。
     """
     data = _get_json()
     if data is None:
         return jsonify({"error": "invalid or missing JSON body"}), 400
-    client_id = data.get("client_id")
-    h_dek_b64 = data.get("h_dek")
+    client_id = data.get("client_id") if isinstance(data.get("client_id"), str) else None
+    h_dek_b64 = data.get("h_dek") if isinstance(data.get("h_dek"), str) else None
     if not client_id or client_id not in clients:
         return jsonify({"error": "unknown client_id"}), 403
+    if client_id != ALLOWED_GET_DEK:
+        return jsonify({"error": "only client B may get DEK for decrypt"}), 403
+    ok, msg = _check_rate_limit(client_id, "get_dek_for_decrypt")
+    if not ok:
+        return jsonify({"error": msg}), 429
     if not h_dek_b64:
         return jsonify({"error": "missing h_dek"}), 400
     h_dek = _b64_to_h_dek_strict(h_dek_b64)
