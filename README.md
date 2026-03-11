@@ -60,6 +60,8 @@ sequenceDiagram
 | **H_dek** | SHA-256(DEK)，作為 DEK 索引供 LS 查詢 |
 | **C_adek / C_bdek** | RSA-OAEP(SHA256) 封裝的 DEK，分別以 A/B 公鑰加密 |
 | **C_doc** | 12 bytes nonce + ChaCha20-Poly1305 密文 |
+| **DEK TTL** | 環境變數 `DEK_TTL_SECONDS`（預設 3600），過期回傳 410 |
+| **審計** | `GET /audit` 查詢操作紀錄（register / request_dek / get_dek_for_decrypt） |
 
 ---
 
@@ -243,7 +245,7 @@ python run_demo.py
 | 項目 | 現況 | 建議進化 |
 |------|------|----------|
 | **身分驗證** | `/register` 僅需 `client_id` 即可註冊，且可覆寫既有公鑰 | 引入 mTLS、簽章 challenge、或 token 等真正認證機制 |
-| **DEK 生命週期** | 已改為 **one-time-use**（B 取用後立即刪除） | 可再加 TTL 過期清理、存取稽核 |
+| **DEK 生命週期** | **one-time-use** + **TTL**（預設 1h，`DEK_TTL_SECONDS`）+ 過期清理 + **操作審計**（`/audit`） | 實務可改為不可竄改儲存、外部 SIEM |
 | **私鑰儲存** | 以 `NoEncryption()` 明文寫檔 | 使用 passphrase 或外部 KMS/HSM |
 | **記憶體清除** | `secure_clear()` 只清除 `bytearray` 拷貝，無法覆寫原始 `bytes` | Python 下屬 best-effort；高敏感環境可考慮 C 擴展或專用記憶體區 |
 | **API 輸入** | 已統一驗證 JSON body，避免 `get_json()` 為 `None` 導致 500 | 可再加 schema 驗證、rate limit |
