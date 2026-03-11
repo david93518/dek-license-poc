@@ -236,7 +236,21 @@ python run_demo.py
 
 ---
 
-## 六、專案結構
+## 六、PoC 限制與進化建議
+
+本 PoC 為概念驗證，以下為已知限制及實務化時建議改進方向：
+
+| 項目 | 現況 | 建議進化 |
+|------|------|----------|
+| **身分驗證** | `/register` 僅需 `client_id` 即可註冊，且可覆寫既有公鑰 | 引入 mTLS、簽章 challenge、或 token 等真正認證機制 |
+| **DEK 生命週期** | 已改為 **one-time-use**（B 取用後立即刪除） | 可再加 TTL 過期清理、存取稽核 |
+| **私鑰儲存** | 以 `NoEncryption()` 明文寫檔 | 使用 passphrase 或外部 KMS/HSM |
+| **記憶體清除** | `secure_clear()` 只清除 `bytearray` 拷貝，無法覆寫原始 `bytes` | Python 下屬 best-effort；高敏感環境可考慮 C 擴展或專用記憶體區 |
+| **API 輸入** | 已統一驗證 JSON body，避免 `get_json()` 為 `None` 導致 500 | 可再加 schema 驗證、rate limit |
+
+---
+
+## 七、專案結構
 
 ```
 dek-poc/

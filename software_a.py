@@ -38,7 +38,7 @@ def load_or_create_keypair(key_path: str):
             f.write(priv.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
+                encryption_algorithm=serialization.NoEncryption(),  # PoC：實務應改用 passphrase 或 KMS/HSM
             ))
     return priv, pub
 
@@ -81,7 +81,11 @@ def encrypt_document(plaintext: bytes, dek: bytes) -> bytes:
 
 
 def secure_clear(buf: bytearray):
-    """盡可能從記憶體清除敏感資料（PoC 用）"""
+    """
+    盡可能從記憶體清除敏感資料（PoC best-effort）。
+    限制：Python bytes 為 immutable，此處清除的是 bytearray(dek) 的拷貝，
+    原始 dek 本體無法強制覆寫，僅能仰賴 GC 回收。
+    """
     for i in range(len(buf)):
         buf[i] = 0
 

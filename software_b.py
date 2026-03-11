@@ -39,7 +39,7 @@ def load_or_create_keypair(key_path: str):
             f.write(priv.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
+                encryption_algorithm=serialization.NoEncryption(),  # PoC：實務應改用 passphrase 或 KMS/HSM
             ))
     return priv, pub
 
@@ -84,6 +84,9 @@ def decrypt_document(c_doc: bytes, dek: bytes) -> bytes:
 
 
 def secure_clear(buf: bytearray):
+    """
+    Best-effort 清除：清除的是 bytearray 拷貝，原始 bytes 本體在 Python 下無法強制覆寫。
+    """
     for i in range(len(buf)):
         buf[i] = 0
 

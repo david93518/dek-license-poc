@@ -34,10 +34,20 @@ def _b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"))
 
 
+def _get_json():
+    """取得並驗證 JSON body，避免 get_json() 為 None 導致 .get() 炸 500"""
+    data = request.get_json(force=False, silent=True)
+    if data is None or not isinstance(data, dict):
+        return None
+    return data
+
+
 @app.route("/register", methods=["POST"])
 def register():
     """客戶端註冊公鑰（PoC 身分綁定）"""
-    data = request.get_json()
+    data = _get_json()
+    if data is None:
+        return jsonify({"error": "invalid or missing JSON body"}), 400
     client_id = data.get("client_id")
     public_key_pem = data.get("public_key_pem")
     if not client_id or not public_key_pem:
@@ -60,7 +70,9 @@ def request_dek():
     LS 生成 DEK、計算 H_dek、以 A 公鑰加密 DEK，並儲存 DEK 供之後 B 使用。
     """
     try:
-        data = request.get_json()
+        data = _get_json()
+        if data is None:
+            return jsonify({"error": "invalid or missing JSON body"}), 400
         client_id = data.get("client_id")
         if not client_id or client_id not in clients:
             return jsonify({"error": "unknown client_id"}), 403
@@ -92,9 +104,11 @@ def request_dek():
 def get_dek_for_decrypt():
     """
     軟體 B 以 H_dek 請求取得 DEK（以 B 公鑰加密）。
-    LS 驗證 B 身分並確認 H_dek 對應的 DEK 存在。
+    LS 驗證 B 身分並確認 H_dek 對應的 DEK 存在。取用後 DEK 立即刪除（one-time-use）。
     """
-    data = request.get_json()
+    data = _get_json()
+    if data is None:
+        return jsonify({"error": "invalid or missing JSON body"}), 400
     client_id = data.get("client_id")
     h_dek_b64 = data.get("h_dek")
     if not client_id or client_id not in clients:
@@ -108,7 +122,7 @@ def get_dek_for_decrypt():
     if h_dek not in dek_store:
         return jsonify({"error": "h_dek not found or expired"}), 404
     _log(f"收到 {client_id} 的 DEK 索取請求，H_dek 驗證通過")
-    dek = dek_store[h_dek]
+    dek = dek_store.pop(h_dek)  # one-time-use：取用後立即刪除
     pub = clients[client_id]["key"]
     _log(f"以 {client_id} 公鑰加密 DEK → C_bdek")
     c_bdek = pub.encrypt(
