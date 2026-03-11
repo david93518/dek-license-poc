@@ -252,13 +252,13 @@ python run_demo.py
 
 ## 六、PoC 限制與已實作改進
 
-| 項目 | 已實作 | 後續可進化 |
-|------|--------|------------|
-| **身分驗證** | 僅 A/B、公鑰指紋綁定（同 ID 不同金鑰 → 409）、RSA ≥2048、角色授權 | mTLS、簽章 challenge、token |
-| **DEK 生命週期** | one-time-use、TTL、過期清理、操作審計、append-only 檔（`AUDIT_FILE`） | 外部 SIEM、hash chain |
-| **私鑰儲存** | 可選 `KEY_PASSPHRASE` 以 passphrase 加密 | KMS/HSM |
-| **記憶體清除** | best-effort 清除 bytearray 拷貝 | C 擴展、專用記憶體區 |
-| **API 輸入** | JSON 驗證、schema 檢查、rate limit | 更嚴格的 schema、分散式 rate limit |
+| 項目 | 已實作 | 
+|------|--------|
+| **身分驗證** | 僅 A/B、公鑰指紋綁定（同 ID 不同金鑰 → 409）、RSA ≥2048、角色授權 |
+| **DEK 生命週期** | one-time-use、TTL、過期清理、操作審計、append-only 檔（`AUDIT_FILE`） | 
+| **私鑰儲存** | 可選 `KEY_PASSPHRASE` 以 passphrase 加密 |
+| **記憶體清除** | best-effort 清除 bytearray 拷貝 |
+| **API 輸入** | JSON 驗證、schema 檢查、rate limit |
 
 ---
 
