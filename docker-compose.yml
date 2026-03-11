@@ -1,0 +1,52 @@
+# 三容器架構：License Server、軟體 A、軟體 B
+# 執行方式見下方指令說明
+
+services:
+  license-server:
+    build: .
+    container_name: dek-ls
+    command: python license_server.py
+    ports:
+      - "5000:5000"
+    environment:
+      - DEMO=1
+    networks:
+      - dek-net
+
+  software-a:
+    build: .
+    container_name: dek-a
+    command: >
+      sh -c "python software_a.py /app/demo_input.txt /data/encrypted_output"
+    environment:
+      - LS_URL=http://license-server:5000
+      - DEMO=1
+    volumes:
+      - dek-shared:/data
+    depends_on:
+      - license-server
+    networks:
+      - dek-net
+
+  software-b:
+    build: .
+    container_name: dek-b
+    command: >
+      sh -c "until [ -f /data/encrypted_output.h_dek ]; do sleep 1; done;
+             python software_b.py /data/encrypted_output /data/decrypted_output.txt"
+    environment:
+      - LS_URL=http://license-server:5000
+      - DEMO=1
+    volumes:
+      - dek-shared:/data
+    depends_on:
+      - software-a
+    networks:
+      - dek-net
+
+volumes:
+  dek-shared:
+
+networks:
+  dek-net:
+    driver: bridge
